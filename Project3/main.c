@@ -3,8 +3,8 @@
  *
  * author: Mahmut Safa BULAT
  *
- * description: This is a project2 main file for ELEC334 project2;
- * "A Fully Operational Scientific Calculator"
+ * description: This is a project3 main file for ELEC334 project3;
+ * "Voice Recorder"
  * Every section is properly explained with comments.
  * You can find pin connections at the end of the code (down below the main)
  */
@@ -19,31 +19,76 @@
 #define eeprom_2_address	0x54
 #define lcd_address			0x27
 
+#define eeprom_end 0xFFFF
+#define eeprom_half 0x7FFF
+
 #define secdelay 1000000
 
 //********************************Definitions * END******************************//
 
 //********************************Global Variables*******************************//
-int state,start,idle =0;
+int state,full,idle =0;		//state flags
+int track_select=0;				//track select
+int recorded[4]={0,0,0,0};
+int isEEPfull;
+int i2c_rec_play=0;
 
 int pressedKey;
 int count =0;
 int clock_counter=0;
 int second,mecond;
-uint8_t a[10];
-uint32_t inputCaptureVal=0x0;
+int play, record=0;
 
-uint32_t pwmvalue;
+uint8_t recBoard[10],q;
+uint8_t a[10];
+uint8_t inputCaptureVal=0x0;
+
+uint8_t pwmvalue_save;
+uint8_t pwmvalue_load;
+uint8_t track[1];
 uint32_t pwmfreq=160;
 
-uint8_t track;
-uint16_t regAddr1,regAddr2=0x0;
-uint16_t regAddrEnd=0xFFFF;
-uint16_t track1End=0xFFFF;
-uint16_t track2End=0x7FFF;
+//uint8_t track[10];
+const uint16_t regAddr1=0x0;			//1st track address start
+const uint16_t regAddr2=0x8000;		//2nd track address start
+
+uint16_t regAddr1_tracker=0x0;
+uint16_t regAddr2_tracker=0x8000;
+
+uint16_t trackEndTRY;
 //******************************Global Variables * END*************************//
 
 //**********************************Functions**********************************//
+void sysclock_64M(){
+
+	RCC->CR |= (1U << 8);			//Enable HSI16
+	while( (RCC->CR & (1U << 10)));	//wait for cyrstal
+
+	FLASH->ACR |= (1U << 8);		//CPU Prefetch enable
+	FLASH->ACR &= ~(0x7U << 0);		//Flash memory access latency; reset
+	FLASH->ACR |= (1U << 0);		//Flash memory access latency; set to 1 wait state
+
+	RCC->PLLCFGR |= (2U << 0);		//Select HSI16 for pll source
+	RCC->PLLCFGR &= ~(0x7U << 4);	//PLLM division /1
+	RCC->PLLCFGR |= (0x8U << 8);	//PLL frequency multiplication factor N x8
+	RCC->PLLCFGR &= ~(0x7U << 29);	//PLL VCO division factor R for PLLRCLK clock output; reset
+	RCC->PLLCFGR |= (1U << 29);		//PLL VCO division factor R for PLLRCLK clock output; /2
+	RCC->PLLCFGR |= (1U << 28);		//PLLRCLK clock output enable
+
+	RCC->CFGR &= ~(1U << 11);		//AHB prescaler to /1
+	RCC->CFGR &= ~(1U << 14);		//APB prescaler to /1
+
+	RCC->CR |= (1U << 24);			//PLLON: PLL enable
+	while( (RCC->CR & (1U << 25)));//Wait for PLL to stable
+
+	RCC->CFGR &= ~(0x7U << 0);		//System clock switch to PLLRCLK
+	RCC->CFGR |= (2U << 0);			//System clock switch to PLLRCLK
+	while( (RCC->CFGR & (2U << 3)));//Wait for PLL to stable
+
+	SystemCoreClockUpdate();
+
+	SysTick_Config(SystemCoreClock);
+}
 void delay(volatile uint32_t s) {	//delay function
     for(; s>0; s--);
     /* @Name:	delay
@@ -84,8 +129,8 @@ void init_timer2(){											//initialization of the TIM2 for PWM
 	TIM2->CR1	|= (1U<<4);			//direction = down-counter
 
 	TIM2->CNT	 = 0;				//Set default TIM2 values
-	TIM2->ARR	 = pwmfreq;			//for 25600 Hz
-	TIM2->PSC	 = 500;			//With AutoReloadRegister and PreSCaler.
+	TIM2->ARR	 = 255;				//for 8-bit setup = 250kHz
+	TIM2->PSC	 = 0;			//With AutoReloadRegister and PreSCaler.
 	TIM2->CCR2	 = pwmfreq/2;		//for %50 duty cycle
 	//PWM configuration for TIM2_CH2
 	TIM2->CCMR1 &= ~(0x7U << 12);			//reset oc2m
@@ -129,6 +174,26 @@ void init_timer3(){											//initialization of the TIM3 for ADC
 	TIM3->CR2 |= (2U << 4);		//MMS; Update
 
 	TIM3->CR1	|= (1<<0);		//enable TIM3
+	/* @Name:	init_timer3
+	 *
+	 * @Brief:	this function configures and enables timer.
+	 */
+}
+void init_timer16(){											//initialization of the TIM3 for ADC
+	RCC->APBENR2 |= (1U << 17); //enable clock for timer16
+
+	TIM16->CR1	 = 0;
+	TIM16->CR1	|= (1<<7);		//enable auto reload
+
+	TIM16->CNT	 = 0;		//Set default TIM3 values
+	TIM16->ARR	 = 1000;		//for 25600 Hz
+	TIM16->PSC	 = 1;		//With AutoReloadRegister and PreSCaler.
+
+	TIM16->DIER	|= (1<<0);		//enable update interrupt
+	TIM16->CR1	|= (1<<0);		//enable TIM3
+
+	NVIC_SetPriority(TIM16_IRQn,2);	//Set priority to 2
+	NVIC_EnableIRQ(TIM16_IRQn);		//Enable NVIC for TIM1
 	/* @Name:	init_timer3
 	 *
 	 * @Brief:	this function configures and enables timer.
@@ -267,10 +332,10 @@ void write_memory_I2C(uint8_t devAddr,uint16_t memAddr,uint8_t* data, int Size){
 	I2C1->CR2 |= (1U << 25); 						//AUTOEND
 	I2C1->CR2 |= (1U << 13); 						//Generate start
 
-	while(!(I2C1->ISR & (1 << 1)));					//
+	while(!(I2C1->ISR & (1 << 1)));					//high address
 	I2C1->TXDR = (uint32_t)(memAddr >> 8);			//(uint32_t)
 
-	while(!(I2C1->ISR & (1 << 1)));					//
+	while(!(I2C1->ISR & (1 << 1)));					//low address
 	I2C1->TXDR = (uint32_t)(memAddr & 0xFF);		//(uint32_t)
 
 	while(Size){									//while size loop
@@ -435,45 +500,77 @@ uint8_t keypad(){					//keypad button configurations
 }
 void capture_key(int keycapture){	//capture (switched) key
 
-	if(keycapture != 'Q'){								//Enter Key
-		//Exit the start menu
-		start =0;
+	if(keycapture == 'Q'){								//default
+
 	}
-	if(keycapture == 'D'){								//Enter Key
+	else if(keycapture == '1'){								//track_select = 1
+		track_select =1;
+		second=0;
+		clock_counter=0;
+	}
+	else if(keycapture == '2'){								//track_select = 2
+		track_select =2;
+		second=0;
+		clock_counter=0;
+	}
+	else if(keycapture == '3'){								//track_select = 3
+		track_select =3;
+		second=0;
+		clock_counter=0;
+	}
+	else if(keycapture == 'A'){								//track_select = 4
+		track_select =4;
+		second=0;
+		clock_counter=0;
+	}
+
+
+	else if(keycapture == 'D'){								//Reset Key
 		//Reset the timeout value if  key pressed
 		second=0;
 		clock_counter=0;
-		state++;
+		play=0;
+		record=0;
+		regAddr1_tracker=0x0;
+		regAddr2_tracker=0x8000;
+		i2c_rec_play=0;
 	}
-	else if(keycapture == '9'){							// +menu key
+	else if(keycapture == '9'){							// -menu key
 		//Reset the timeout value if  key pressed
 		second=0;
 		clock_counter=0;
 		state--;
+		idle=0;
 	}
-	else if(keycapture == 'C'){							// -menu key
+	else if(keycapture == 'C'){							// +menu key
 		//Reset the timeout value if  key pressed
 		second=0;
 		clock_counter=0;
 		state++;
+		idle=0;
 	}
 	else if(keycapture == 'E'){							//Record Key
 		//Reset the timeout value if  key pressed
 		second=0;
 		clock_counter=0;
-		state=3;
+		record=1;
+		play=0;
+		i2c_rec_play=1;
 	}
 	else if(keycapture == '0'){							//Playback Key
 		//Reset the timeout value if  key pressed
 		second=0;
 		clock_counter=0;
-		state=4;
+		play=1;
+		record=0;
+		i2c_rec_play=2;
 	}
-	else if(keycapture == 'F'){							//Other Key
+	else if(keycapture == 'F'){							//idle Key
 		//Reset the timeout value if  key pressed
 		second=0;
 		clock_counter=0;
-		state=5;
+		i2c_rec_play=0;
+		idle=1;
 	}
 	/* @Name:	capture_key
 	 * @Brief:	The mechanism abowe is basicly makes the shitfing (the digits) .
@@ -482,30 +579,34 @@ void capture_key(int keycapture){	//capture (switched) key
 	 * 					digits become; d0 = 3, d1=2, d2=3
 	 */
 }
-void start_state(){					//start state for calculator (stand by)
-	lcd_setCursor(1,1);
-	lcd_send_string("   Safa BULAT   ");
-	lcd_setCursor(2,1);
-	lcd_send_string("    141024051   ");
-	 /* @Name:	start_state
-	 *
-	 * @Brief:	this function is stand-by phase of the calculator.
-	 * It shows desired 4 digit on the LCD at start. You can activate calculator by pressing F button.
-	 * The calculator will return to this stage if no button is pressed for 10 seconds.
-	 */
-}
 void idle_state(){
-	char selected_menu[8] = "record";
 
 	lcd_setCursor(1,1);
 	lcd_send_string("   IDLE State   ");
 	lcd_setCursor(2,1);
-	lcd_send_string("Menu?: ");
-	lcd_setCursor(2,8);
-	lcd_send_string(selected_menu);
+	lcd_send_string("Waiting Menu Key");
 	//show IdLE and wait for menu select key
 
 	 /* @Name:	idle_state
+	 *
+	 * @Brief:	this function is stand-by phase of the calculator.
+	 * It shows desired 4 digit on the SSD at start. You can activate calculator by pressing F button.
+	 * The calculator will return to this stage if no button is pressed for 10 seconds.
+	 */
+}
+void status_state(){
+	lcd_setCursor(1,1);
+	lcd_send_string("  STATUS State  ");
+	lcd_setCursor(2,1);
+	lcd_PrintInt(isEEPfull);
+	lcd_setCursor(2,2);
+	lcd_send_string(" ");
+	lcd_setCursor(2,3);
+	lcd_send_string("Rec Avaliable.");
+
+	//show rcd and wait for track select or status
+
+	 /* @Name:	status_state
 	 *
 	 * @Brief:	this function is stand-by phase of the calculator.
 	 * It shows desired 4 digit on the SSD at start. You can activate calculator by pressing F button.
@@ -517,7 +618,8 @@ void full_state(){
 	lcd_send_string("   FULL State   ");
 	lcd_setCursor(2,1);
 	lcd_send_string("EEPROMs are FULL");
-
+	delay(3000000);
+	full=0;
 	 /* @Name:	full_state
 	 *
 	 * @Brief:	this function is stand-by phase of the calculator.
@@ -526,28 +628,16 @@ void full_state(){
 	 */
 }
 void record_state(){
-	int track_num= 3;
 	lcd_setCursor(1,1);
 	lcd_send_string("  RECORD State  ");
 	lcd_setCursor(2,1);
 	lcd_send_string("Track?: ");
 	lcd_setCursor(2,9);
-	lcd_PrintInt(track_num);
-//
-//	if(pressedKey == '1'){ // if 1 pressed record to 1
-//		record[0]= 0x0;//1
-//	}
-//	else if(pressedKey == '2'){ // if 2 pressed record to 2
-//		record[0]= 0x0;//2
-//	}
-//	else if(pressedKey == '3'){ // if 3 pressed record to 3
-//		record[0]= 0x0;//4
-//	}
-//	else if(pressedKey == '4'){ // if 4 pressed record to 4
-//		record[0]= 0x0;//4
-//	}
+	lcd_PrintInt(track_select);
+	lcd_setCursor(2,10);
+	lcd_send_string("       ");
 
-	//show rcd and wait for track select or record
+
 
 	 /* @Name:	record_state
 	 *
@@ -557,15 +647,15 @@ void record_state(){
 	 */
 }
 void playback_state(){
-	int track_num= 3;
 	lcd_setCursor(1,1);
 	lcd_send_string(" PLAYBACK State ");
 	lcd_setCursor(2,1);
 	lcd_send_string("Track?: ");
 	lcd_setCursor(2,9);
-	lcd_PrintInt(track_num);
+	lcd_PrintInt(track_select);
+	lcd_setCursor(2,10);
+	lcd_send_string("       ");
 
-	//show rcd and wait for track select or playback
 
 	 /* @Name:	playback_state
 	 *
@@ -574,155 +664,227 @@ void playback_state(){
 	 * The calculator will return to this stage if no button is pressed for 10 seconds.
 	 */
 }
-void status_state(){
-	int track_num= 3;
-	lcd_setCursor(1,1);
-	lcd_send_string("  STATUS State  ");
-	lcd_setCursor(2,1);
-	lcd_PrintInt(track_num);
-	lcd_setCursor(2,3);
-	lcd_send_string("Rec Avaliable");
-
-	//show rcd and wait for track select or status
-
-	 /* @Name:	status_state
-	 *
-	 * @Brief:	this function is stand-by phase of the calculator.
-	 * It shows desired 4 digit on the SSD at start. You can activate calculator by pressing F button.
-	 * The calculator will return to this stage if no button is pressed for 10 seconds.
-	 */
-}
 void voice_recorder(){					//Voice recorder main function
 
-	if(start == 1){//idle state
-		start_state();
-	}
-	else if(state == 1){//full_state
-		idle_state();
-	}
-	else if(state == 2){//full_state
+	//*******************IF RECORDED*************************//
+	if((isEEPfull==4) && (full == 1)){						//full_state
 		full_state();
 	}
-	else if(state == 3){//record_state
-		record_state();
+	else{
+	//*******************IF STATE***************************//
+		if(idle == 1){						//idle_state
+			idle_state();
+		}
+		else if(state == 1){				//record_state
+			record_state();
+		}
+		else if(state == 2){				//playback_state
+			playback_state();
+		}
+		else if(state == 3){				//status_state
+			status_state();
+		}
+		else if(state > 3){					//reset/clear etc. state
+			state=1;
+		}
+		else if(state < 1){					//reset/clear etc. state
+			state=3;
+		}
 	}
-	else if(state == 4){//playback_state
-		playback_state();
-	}
-	else if(state == 5){//status_state
-		status_state();
-	}
-	else if(state > 5){//reset/clear etc. state
-		state=2;
-	}
-	else if(state < 2){//reset/clear etc. state
-		state=5;
-	}
-
 	 /* @Name:	voice_recorder
 	 *
-	 * @Brief:	this function is calculator itself. It operates the following operations;
+	 * @Brief:	this function is voice_recorder. It operates as followings;
 	 *
-	 * Mode: Basic				Operator:	0x0 0x0 ?
-	 * 		-addition								A
-	 * 		-substaction							B
-	 * 		-multipication							C
-	 * 		-division								D
-	 *
-	 * Mode: Scientific			Operator:	0x0 E 	?
-	 * 		-log									A
-	 * 		-ln										B
-	 * 		-sqrt									C
-	 * 		-power									D
-	 *
-	 * Mode: Trigonometric		Operator:	E 	E 	?
-	 * 		-sin									A
-	 * 		-cos									B
-	 * 		-tan									C
-	 * 		-cot									D
-	 *
-	 * -You can compute negatif numbers, float number as well
-	 * -You can replace the number with pi with EEE
-	 * -Calculator will go to the idle state if no button is pressed for 10seconds
-	 * -You can use previous resuld as a new value by 'A'
 	 */
 }
 //*******************************Functions * END*******************************//
 
 //*****************************Interrupts and main****************************//
 void TIM1_BRK_UP_TRG_COM_IRQHandler(void){		//timer1 interrupt handler
-	pressedKey= keypad();		//get pressed key
-	capture_key(pressedKey);	//send pressed key
+	pressedKey= keypad();						//get pressed key
+	capture_key(pressedKey);					//send pressed key
 	clock_counter++;
+    isEEPfull=recorded[0]+recorded[1]+recorded[2]+recorded[3];
 
-	if(clock_counter == 5){		//for 10sec timeout
+	if((record == 1) || (play == 1)){			//dont go to idle or etc
+		clock_counter=0;						//when its recording or
+		second=0;								//when its playing
+	}
+	if(clock_counter == 5){						//for 1sec timeout
 		clock_counter=0;
 		second++;
+		GPIOC->ODR ^= (1U << 6);				//blink test led (PC6 onboard led)
 
-		GPIOC->ODR ^= (1U << 6);
-
-
-		if(second==10){			//if 10sec has passed;
-			second=0;			//reset second counter
-			state=1;			//go to the idle state
-//			idle=1;				//go to the idle state
+		if(second==10){							//if 10sec has passed;
+			second=0;							//reset second counter
+			idle=1;								//go to the idle state
 		}
 	}
-	TIM1->SR	&= ~(1U <<0); 			//clear update status
+	TIM1->SR	&= ~(1U <<0); 					//clear update status
 }
 void TIM2_IRQHandler(void){						//timer2 interrupt handler
-
-//	if(regAddr1 < regAddrEnd){
-//		random_read_I2C(eeprom_1_address, regAddr1, (uint8_t *)&track, 1);
-//		regAddr1++;
-//
-//		//pwm ile dac  -> speaker'a yolla..
-//	}
-//	else if(regAddr2 < regAddrEnd){
-//		random_read_I2C(eeprom_2_address, regAddr2, (uint8_t *)&track, 1);
-//		regAddr2++;
-//
-//		//pwm ile dac  -> speaker'a yolla..
-//	}
-//	else{
-//		regAddr1=0x0;
-//		regAddr2=0x0;
-//		//print kayitlar bitti etc..
-//	}
-//	while(!(I2C1->ISR & (1 << 1)));					//
-//	I2C1->TXDR = (uint32_t)(memAddr >> 8);			//(uint32_t)
-//
-//	while(!(I2C1->ISR & (1 << 1)));					//
-//	I2C1->TXDR = (uint32_t)(memAddr & 0xFF);		//(uint32_t)
-
-	mecond++;
-
-	TIM2->CCR2	 = (pwmvalue-180)/2;		//for %50 duty cycle
-//	TIM2->CR1 = pwmvalue;				//load pwm value to pwm.
-
-//	TIM2->SR	&= ~(1U <<2); 			//clear update status
-	TIM2->SR	&= ~(1U <<0); 			//clear update status
+	TIM2->CCR2=(uint32_t)(pwmvalue_load-180)/2;	//send value buffer to pwm (to speaker)
+	TIM2->SR	&= ~(1U <<0); 					//clear update status
 }
 void TIM3_IRQHandler(void){						//timer3 interrupt handler
 	TIM3->SR	&= ~(1U <<0); 			//clear update status
 	//closed
 }
+void TIM16_IRQHandler(void){
+
+	if(i2c_rec_play==1){
+		if(track_select == 1){
+	    	if(record == 1){
+	    		play=0;
+	    		write_memory_I2C(eeprom_1_address, (uint16_t)regAddr1_tracker, (uint8_t *)&pwmvalue_save, 1);
+	    		delay(10000);
+	    		regAddr1_tracker++;
+
+	    		if((regAddr1_tracker >= 0x7FFF)  || (record==0)){
+	    			record=0;
+	    			regAddr1_tracker=0x0;
+	    			recorded[0]=1;
+
+	    			i2c_rec_play=0;
+	    		}
+
+	    	}
+		}
+		else if(track_select == 2){
+	    	if(record == 1){
+	    		play=0;
+	//    		write_memory_I2C(eeprom_1_address, (uint16_t)regAddr2_tracker, (uint8_t *)&pwmvalue_save, 1);
+
+	    		regAddr2_tracker++;
+
+	    		if((regAddr2_tracker >= 0xFFFF)  || (record==0)){
+	    			record=0;
+	    			regAddr2_tracker=0x8000;
+	    			recorded[1]=1;
+
+	    			i2c_rec_play=0;
+	    		}
+	    	}
+
+		}
+		else if(track_select == 3){
+			if(record == 1){
+				play=0;
+	//		    write_memory_I2C(eeprom_2_address, (uint16_t)regAddr1_tracker, (uint8_t *)&pwmvalue_save, 1);
+				regAddr1_tracker++;
+
+			    if((regAddr1_tracker >= 0x7FFF ) || (record==0)){
+			    	record=0;
+			    	regAddr1_tracker=0x0;
+			    	recorded[2]=1;
+
+			    	i2c_rec_play=0;
+			    }
+			}
+
+		}
+		else if(track_select == 4){
+	    	if(record == 1){
+	    		play=0;
+	//    		write_memory_I2C(eeprom_2_address, (uint16_t)regAddr2_tracker, (uint8_t *)&pwmvalue_save, 1);
+	    		regAddr2_tracker++;
+
+	    		if((regAddr2_tracker >= 0xFFFF ) || (record==0)){
+	    			record=0;
+	    			regAddr2_tracker=0x8000;
+	    			recorded[3]=1;
+
+	    			i2c_rec_play=0;
+	    		}
+	    	}
+
+		}
+	}
+	else if(i2c_rec_play==2){
+
+		if(track_select == 1){
+	    	if(play == 1){
+	    		record=0;
+	    		random_read_I2C(eeprom_1_address, (uint16_t)regAddr1_tracker, (uint8_t *)&track[0], 1);
+	    		delay(10000);
+	    		pwmvalue_load=track[0];
+	    		regAddr1_tracker++;
+
+	    		if((regAddr1_tracker >= 0x7FFF ) || (play==0)){
+	    			play=0;
+	    			regAddr1_tracker=0x0;
+
+	    			i2c_rec_play=0;
+	    		}
+
+	    	}
+		}
+		else if(track_select == 2){
+	    	if(play == 1){
+	    		record=0;
+//	    		random_read_I2C(eeprom_1_address, (uint16_t)regAddr2_tracker, (uint8_t *)&track[0], 1);
+	    		pwmvalue_load=track[0];
+	    		regAddr2_tracker++;
+
+	    		if((regAddr2_tracker >= 0xFFFF ) || (play==0)){
+	    			play=0;
+	    			regAddr2_tracker=0x0;
+
+	    			i2c_rec_play=0;
+	    		}
+	    	}
+
+		}
+		else if(track_select == 3){
+			if(play == 1){
+				record=0;
+//				random_read_I2C(eeprom_2_address, (uint16_t)regAddr1_tracker, (uint8_t *)&track[0], 1);
+	    		pwmvalue_load=track[0];
+				regAddr1_tracker++;
+
+			    if((regAddr1_tracker >= 0x7FFF ) || (play==0)){
+	    			play=0;
+	    			regAddr1_tracker=0x0;
+
+	    			i2c_rec_play=0;
+			    }
+			}
+
+		}
+		else if(track_select == 4){
+	    	if(play == 1){
+	    		record=0;
+//	    		random_read_I2C(eeprom_2_address, (uint16_t)regAddr2_tracker, (uint8_t *)&track[0], 1);
+	    		pwmvalue_load=track[0];
+	    		regAddr2_tracker++;
+
+	    		if((regAddr2_tracker >= 0xFFFF ) || (play==0)){
+	    			play=0;
+	    			regAddr2_tracker=0x0;
+
+	    			i2c_rec_play=0;
+	    		}
+	    	}
+
+		}
+	}
+	TIM16->SR	&= ~(1U <<0); 			//clear update status
+}
 void I2C1_IRQHandler(void){						//i2c handler
-//	int error=1;
 	//only come here if error occurs..
 }
 void ADC_COMP_IRQHandler(void){					//adc1 interrupt handler
-	inputCaptureVal=(uint32_t)(ADC1->DR);
-	pwmvalue=inputCaptureVal;
-
-	ADC1->ISR &= (1U <<2); //clear interrupt
-	TIM2->ARR	 = pwmvalue;			//for 25600 Hz
+	inputCaptureVal=(uint8_t)(ADC1->DR);		//capture mic value
+	pwmvalue_save=(inputCaptureVal)%256;		//send captured value to save buffer
+	ADC1->ISR &= (1U <<2); 						//clear interrupt
 }
 int main(void) {								//main
 	//Enable clock for PORT A and PORT B
 	RCC->IOPENR |= 0x3;
 	RCC->IOPENR |= (1U << 2); //port c for test
 	//**** Function inits ****//
+	sysclock_64M();
+
 	init_timer1();
 	init_timer2();
 	init_timer3();
@@ -735,6 +897,10 @@ int main(void) {								//main
 	//**** conf. PC6 as test led ****//
     GPIOC->MODER &= ~(3U << 2*6);
     GPIOC->MODER |= (1U << 2*6);
+
+    GPIOB->MODER &= ~(3U << 2*4);
+    GPIOB->MODER |= (1U << 2*4);
+
     delay(1000000);
     GPIOC->BRR |= (1U << 6);
     //**delete after test**//
@@ -742,48 +908,22 @@ int main(void) {								//main
     //**startup**//
     lcd_clear_all();						//clear lcd
     delay(100000);							//wait ~10ms
-	lcd_setCursor(1,1);						//set cursor: row1
-	lcd_send_string("        x       ");	//write x to the middle with no reason
-	lcd_setCursor(2,1);						//set cursor: row2
-	lcd_send_string("        y       ");	//write y to the middle with no reason
-    delay(1000000);							//delay 1sec
-    start= 1;								//go to the start state
+	lcd_setCursor(1,1);
+	lcd_send_string("   Safa BULAT   ");
+	lcd_setCursor(2,1);
+	lcd_send_string("    141024051   ");
+    delay(3000000);							//delay 1sec
+
     lcd_clear_all();
+    idle=1;
+
+    init_timer16();
     //**end startup**//
     while(1) {
-    	lcd_setCursor(1, 1);
-    	lcd_send_string("ADC data: ");
-    	lcd_setCursor(2, 1);
-    	lcd_PrintInt((int)second);
-    	lcd_setCursor(2, 8);
-    	lcd_PrintInt((int)inputCaptureVal);
-    	lcd_setCursor(2, 14);
-    	lcd_PrintInt(mecond);
-//    	voice_recorder();					//activate voice recorder
-
-//        write_memory_I2C(eeprom_1_address, 0x3, (uint8_t* )0xAA,1);
-//        delay(1000000);
-//        a[0]= 0x21;
-//        delay(1000000);
-//        random_read_I2C(eeprom_1_address, 0x3, (uint8_t* )a, 1);
-//
-//        write_memory_I2C(eeprom_2_address, 0x0, (uint8_t* )0x35,1);
-//        delay(1000000);
-//        a[0]= 0x21;
-//        delay(1000000);
-//        random_read_I2C(eeprom_2_address, 0x0, (uint8_t* )&a[2], 1);
-//
-////******************************************************************************//
-//        lcd_clear_all();
-//		lcd_setCursor(1,1);
-//		lcd_send_string("1602LCD Display");
-//		lcd_setCursor(2,1);
-//		lcd_send_string("FUK 7SD i=");
-//
-//		lcd_setCursor(2,12);
-//		lcd_PrintInt(mecond);
-//		mecond++;
-		if(mecond>=100){ mecond=0; }
+		GPIOB->ODR ^= (1U << 4);
+//		if(i2c_rec_play == 0){
+//			voice_recorder();					//activate voice recorder
+//		}
     }
     return 0;
 }
@@ -806,21 +946,22 @@ int main(void) {								//main
  *  Row3				PA1
  *  Row4				PA0
  * ............................................................................
- * 4xSSD;......................................................................
- * SEG4: 				PA15	(Very Left segment of SSD)
- * SEG3:				PA8
- * SEG2:				PA10
- * SEG1:				PA9		(Very Right segment of SSD)
  *
- * A:					PB9		(eg. A sector of SSD, check datasheet for more.)
- * B:					PB4
- * C:					PB8
- * D:					PB2
- * E:					PB0
- * F:					PB5
- * G:					PB1
+ * I2C;........................................................................
+ *
+ * SCL: PB6
+ * SDA: PB7
+ *
+ * On I2C bus i have 3 devices; EEPROM1, EEPROM2, 1602 LCD (i2c)
  * ............................................................................
+ *
+ * ADC; Mic. is connected to ADC at PB1........................................
+ * ............................................................................
+ *
+ * PWM; PWM out is PB3 (connected to speaker)..................................
+ * ............................................................................
+ *
  * Test LED(s);................................................................
- * (Green LED);			PB6
+ * Onboard LED;			PC6
  * ............................................................................
  */
